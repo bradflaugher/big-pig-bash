@@ -2,6 +2,7 @@
 *.d
 .pio/
 .vscode/
+__pycache__/
 
 # Object files
 *.o

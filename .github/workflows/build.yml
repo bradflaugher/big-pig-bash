@@ -54,7 +54,7 @@ jobs:
           3. Drag `BigPigBash.hex` onto the player.
           4. Use the arrow keys to move, `A` or `Z` to fire, and `S`, `X`, or `B` for BIG BASH.
 
-          Sound works in the browser. Press the Arduboy A and B buttons together to pause.
+          Sound works in the browser. Hold Up and Down together to pause.
 
           The same HEX can be uploaded directly to an Arduboy or Arduboy FX. It contains all
           artwork and music, so no separate FX data file is required.
