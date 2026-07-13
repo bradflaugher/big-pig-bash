@@ -1,14 +1,19 @@
 #include <Arduboy2.h>
+#include <ArduboyTones.h>
 #include <EEPROM.h>
+#include "sprites.h"
 
 Arduboy2 arduboy;
-BeepPin1 sound;
+ArduboyTones sound(arduboy.audio.enabled);
 
 constexpr uint8_t FPS = 30;
 constexpr uint8_t MAX_ENEMIES = 6;
-constexpr uint8_t MAX_SHOTS = 9;
+constexpr uint8_t MAX_SHOTS = 12;
 constexpr uint8_t MAX_SPARKS = 12;
 constexpr uint8_t MAX_HP = 6;
+constexpr uint8_t BASH_MAX = 60;
+constexpr uint8_t CROW_KING_HP = 10;
+constexpr uint8_t MUDZILLA_HP = 14;
 constexpr uint8_t SAVE_ADDR = EEPROM_STORAGE_SPACE_START;
 
 enum Mode : uint8_t { TITLE, STORY, PLAY, REWARD, BOSS_CARD, HURT_CARD, VICTORY, PAUSED };
@@ -57,10 +62,14 @@ uint8_t beaten = 0;
 uint8_t waveTarget = 0;
 uint8_t spawnClock = 0;
 uint8_t shotClock = 0;
-uint8_t bashCharge = 90;
+uint8_t bashCharge = BASH_MAX;
+uint8_t bashBuffer = 0;
+uint8_t pauseHold = 0;
 uint8_t invincible = 0;
 uint8_t screenShake = 0;
 uint8_t cardClock = 0;
+uint8_t calloutClock = 0;
+uint8_t calloutKind = 0;
 uint8_t rewardPick = 0;
 uint8_t giftA = 0;
 uint8_t giftB = 1;
@@ -74,8 +83,8 @@ uint16_t score = 0;
 SaveData saveData;
 
 const uint16_t melody[] PROGMEM = {
-  1910, 1516, 1275, 954, 1135, 1275, 1516, 1702,
-  1910, 1516, 1275, 1135, 954, 1275, 1516, 0
+  523, 659, 784, 1047, 880, 784, 659, 587,
+  523, 659, 784, 880, 1047, 784, 659, 0
 };
 
 const char gift0[] PROGMEM = "QUICK";
@@ -96,8 +105,8 @@ int8_t stepToward(int8_t delta) { return delta > 0 ? 1 : (delta < 0 ? -1 : 0); }
 uint8_t smaller(uint8_t a, uint8_t b) { return a < b ? a : b; }
 uint8_t larger(uint8_t a, uint8_t b) { return a > b ? a : b; }
 
-void playTone(uint16_t count, uint8_t duration) {
-  sound.tone(count, duration);
+void playTone(uint16_t frequency, uint8_t duration) {
+  sound.tone(frequency, duration * 32);
   musicClock = 5;
 }
 
@@ -142,11 +151,13 @@ void beginWave(bool refill) {
   clearActors();
   pigX = 60;
   pigY = 39;
-  spawned = beaten = spawnClock = shotClock = 0;
-  bashCharge = 90;
-  invincible = 30;
+  spawned = beaten = shotClock = 0;
+  spawnClock = (wave == 4 || wave == 8) ? 1 : 24;
+  bashCharge = BASH_MAX;
+  bashBuffer = pauseHold = 0;
+  invincible = 50;
   if (refill) hp = smaller(MAX_HP, hp + 2);
-  waveTarget = (wave == 4 || wave == 8) ? 1 : 4 + wave;
+  waveTarget = (wave == 4 || wave == 8) ? 1 : 3 + (wave + 1) / 2;
   mode = (wave == 4 || wave == 8) ? BOSS_CARD : PLAY;
   cardClock = 0;
   saveProgress();
@@ -172,10 +183,11 @@ void spawnFoe() {
     int8_t x = (edge == 0) ? 3 : (edge == 1 ? 115 : random(8, 116));
     int8_t y = (edge == 2) ? 14 : (edge == 3 ? 52 : random(16, 52));
     if (type >= CROW_KING) { x = 101; y = 27; }
-    uint8_t health = type == CROW_KING ? 18 : (type == MUD_MONSTER ? 24 : 1 + wave / 3);
+    uint8_t health = type == CROW_KING ? CROW_KING_HP :
+                     (type == MUD_MONSTER ? MUDZILLA_HP : 1);
     foes[i] = {x, y, 0, 0, type, health, (uint8_t)random(30), 0, true};
     ++spawned;
-    playTone(type >= CROW_KING ? 2550 : 3032, 2);
+    playTone(type >= CROW_KING ? 392 : 330, 2);
     return;
   }
 }
@@ -190,15 +202,29 @@ void shootOne(int8_t vx, int8_t vy) {
 }
 
 void shoot() {
-  int8_t sx = aimX * 3;
-  int8_t sy = aimY * 3;
+  uint16_t nearest = 65535;
+  for (uint8_t i = 0; i < MAX_ENEMIES; ++i) {
+    if (!foes[i].alive) continue;
+    int16_t dx = foes[i].x + foeWidth(foes[i].type) / 2 - (pigX + 7);
+    int16_t dy = foes[i].y + foeHeight(foes[i].type) / 2 - (pigY + 7);
+    uint16_t distance = dx * dx + dy * dy;
+    if (distance < nearest) {
+      nearest = distance;
+      if (abs(dx) > abs(dy) * 2) { aimX = stepToward(dx); aimY = 0; }
+      else if (abs(dy) > abs(dx) * 2) { aimX = 0; aimY = stepToward(dy); }
+      else { aimX = stepToward(dx); aimY = stepToward(dy); }
+    }
+  }
+  int8_t sx = aimX * (aimY ? 2 : 3);
+  int8_t sy = aimY * (aimX ? 2 : 3);
   shootOne(sx, sy);
   if (tripleLevel) {
-    if (aimX) { shootOne(sx, 1); shootOne(sx, -1); }
+    if (aimX && aimY) { shootOne(aimX * 3, 0); shootOne(0, aimY * 3); }
+    else if (aimX) { shootOne(sx, 1); shootOne(sx, -1); }
     else { shootOne(1, sy); shootOne(-1, sy); }
   }
   shotClock = larger(4, 10 - rapidLevel * 2);
-  playTone(1516, 2);
+  playTone(659, 2);
 }
 
 void damageFoe(Foe &foe, uint8_t amount) {
@@ -206,7 +232,7 @@ void damageFoe(Foe &foe, uint8_t amount) {
   foe.flash = 4;
   if (foe.hp > amount) {
     foe.hp -= amount;
-    playTone(2271, 2);
+    playTone(440, 2);
     return;
   }
   foe.alive = false;
@@ -214,30 +240,36 @@ void damageFoe(Foe &foe, uint8_t amount) {
   score += foe.type >= CROW_KING ? 500 : 50;
   screenShake = foe.type >= CROW_KING ? 10 : 3;
   burstSparks(foe.x + foeWidth(foe.type) / 2, foe.y + foeHeight(foe.type) / 2);
-  playTone(foe.type >= CROW_KING ? 758 : 1135, 6);
+  calloutClock = 18;
+  calloutKind = foe.type == BEE ? 2 : 1;
+  playTone(foe.type >= CROW_KING ? 1319 : 880, 6);
 }
 
 void bigBash() {
-  if (bashCharge < 90) return;
+  if (bashCharge < BASH_MAX) return;
   bashCharge = 0;
-  invincible = 18;
-  screenShake = 8;
-  playTone(638, 8);
+  invincible = 30;
+  screenShake = 12;
+  playTone(1568, 9);
   for (uint8_t i = 0; i < MAX_ENEMIES; ++i) {
     if (!foes[i].alive) continue;
     int16_t dx = foes[i].x + foeWidth(foes[i].type) / 2 - (pigX + 7);
     int16_t dy = foes[i].y + foeHeight(foes[i].type) / 2 - (pigY + 7);
-    if (dx * dx + dy * dy < 625) damageFoe(foes[i], 2 + turboLevel);
+    if (dx * dx + dy * dy < 1600) damageFoe(foes[i], 3 + turboLevel * 2);
   }
   for (uint8_t i = 0; i < 8; ++i)
     addSpark(pigX + 7, pigY + 7, (i % 3) - 1, ((i + 1) % 3) - 1, 14);
+  calloutClock = 28;
+  calloutKind = 0;
 }
 
 void hurtPig() {
   if (invincible) return;
-  invincible = 40 + toughLevel * 8;
+  invincible = 60 + toughLevel * 10;
   screenShake = 8;
-  playTone(3821, 8);
+  calloutClock = 24;
+  calloutKind = 3;
+  playTone(196, 8);
   if (--hp == 0) {
     mode = HURT_CARD;
     cardClock = 0;
@@ -248,7 +280,7 @@ void hurtPig() {
 void updateFoes() {
   if (spawned < waveTarget && !spawnClock) {
     spawnFoe();
-    spawnClock = (wave == 4 || wave == 8) ? 22 : 36;
+    spawnClock = (wave == 4 || wave == 8) ? 30 : 42;
   }
   if (spawnClock) --spawnClock;
 
@@ -259,15 +291,15 @@ void updateFoes() {
     if (f.flash) --f.flash;
     int8_t dx = pigX - f.x;
     int8_t dy = pigY - f.y;
-    uint8_t pace = f.type == MOLE ? 3 : (f.type >= CROW_KING ? 2 : 4);
+    uint8_t pace = f.type == MOLE ? 6 : (f.type >= CROW_KING ? 3 : 5);
 
     bool teleported = false;
     if (f.type == BEE) {
-      if (!(f.clock % 3)) f.x += stepToward(dx);
-      if (!(f.clock % 2)) f.y += stepToward(dy);
+      if (!(f.clock % 4)) f.x += stepToward(dx);
+      if (!(f.clock % 3)) f.y += stepToward(dy);
     } else if (f.type == CROW_KING) {
       if (!(f.clock % pace)) { f.x += stepToward(dx); f.y += stepToward(dy); }
-      if (!(f.clock % 48)) {
+      if (!(f.clock % 75)) {
         f.x = pigX < 58 ? 99 : 7;
         f.y = random(17, 44);
         teleported = true;
@@ -326,7 +358,7 @@ void finishWave() {
     ++saveData.crowns;
     saveProgress();
     cardClock = 0;
-    playTone(954, 14);
+    playTone(1047, 14);
     return;
   }
   giftA = wave % 4;
@@ -349,13 +381,16 @@ void finishWave() {
 }
 
 void updatePlay() {
-  if (arduboy.pressed(A_BUTTON | B_BUTTON) &&
-      (arduboy.justPressed(A_BUTTON) || arduboy.justPressed(B_BUTTON))) {
-    modeBeforePause = mode;
-    mode = PAUSED;
-    return;
-  }
-  if (arduboy.justPressed(B_BUTTON)) bigBash();
+  if (arduboy.pressed(UP_BUTTON | DOWN_BUTTON)) {
+    if (pauseHold < 30) ++pauseHold;
+    if (pauseHold == 30) {
+      pauseHold = 0;
+      modeBeforePause = mode;
+      mode = PAUSED;
+      return;
+    }
+  } else pauseHold = 0;
+  if (arduboy.justPressed(B_BUTTON)) bashBuffer = 18;
 
   int8_t speed = 1;
   if (arduboy.pressed(LEFT_BUTTON)) { pigX -= speed; aimX = -1; aimY = 0; }
@@ -367,9 +402,14 @@ void updatePlay() {
 
   if (shotClock) --shotClock;
   if (arduboy.pressed(A_BUTTON) && !shotClock) shoot();
-  if (bashCharge < 90) bashCharge = smaller(90, bashCharge + 1 + turboLevel);
+  if (bashCharge < BASH_MAX) bashCharge = smaller(BASH_MAX, bashCharge + 1 + turboLevel);
+  if (bashBuffer) {
+    --bashBuffer;
+    if (bashCharge == BASH_MAX) { bigBash(); bashBuffer = 0; }
+  }
   if (invincible) --invincible;
   if (screenShake) --screenShake;
+  if (calloutClock) --calloutClock;
   updateFoes();
   updateShots();
   updateSparks();
@@ -383,17 +423,17 @@ void chooseGift() {
   else if (gift == TOUGH) { toughLevel = smaller(2, toughLevel + 1); hp = MAX_HP; }
   else turboLevel = smaller(2, turboLevel + 1);
   ++wave;
-  playTone(954, 9);
+  playTone(1047, 9);
   beginWave(true);
 }
 
 void updateMusic() {
   if (musicClock) { --musicClock; return; }
-  if (sound.duration || mode == HURT_CARD || mode == PAUSED) return;
+  if (sound.playing() || mode == HURT_CARD || mode == PAUSED) return;
   uint16_t note = pgm_read_word(&melody[musicStep]);
   musicStep = (musicStep + 1) & 15;
   musicClock = mode == PLAY ? 7 : 5;
-  if (note) sound.tone(note, mode == PLAY ? 2 : 3);
+  if (note) sound.tone(note, mode == PLAY ? 70 : 100);
 }
 
 void printCentered(const __FlashStringHelper *text, int8_t y) {
@@ -402,130 +442,118 @@ void printCentered(const __FlashStringHelper *text, int8_t y) {
 }
 
 void drawPig(int8_t x, int8_t y, bool big = false) {
-  uint8_t w = big ? 20 : 14;
-  uint8_t h = big ? 14 : 11;
-  int8_t bob = (arduboy.frameCount >> 2) & 1;
-  y += bob;
-  arduboy.fillRoundRect(x + 1, y + 4, w - 2, h - 4, 3, WHITE);
-  arduboy.fillCircle(x + w - 5, y + 5, big ? 5 : 4, WHITE);
-  arduboy.fillTriangle(x + w - 8, y + 2, x + w - 6, y - 2, x + w - 3, y + 2, WHITE);
-  arduboy.drawPixel(x + w - 3, y + 4, BLACK);
-  arduboy.fillRect(x + w - 2, y + 7, 3, 2, BLACK);
-  arduboy.drawPixel(x + w - 1, y + 7, WHITE);
-  arduboy.drawCircle(x + 1, y + 6, 2, BLACK);
-  arduboy.fillRect(x + 3, y + h - 1, 2, 3, WHITE);
-  arduboy.fillRect(x + w - 6, y + h - 1, 2, 3, WHITE);
-}
-
-void drawCrow(int8_t x, int8_t y, bool king) {
-  uint8_t flap = (arduboy.frameCount >> 2) & 1;
-  uint8_t size = king ? 8 : 4;
-  arduboy.fillCircle(x + size, y + size, size, WHITE);
-  arduboy.fillTriangle(x + size * 2 - 1, y + size - 2, x + size * 2 + 5, y + size,
-                       x + size * 2 - 1, y + size + 2, WHITE);
-  arduboy.drawPixel(x + size + 2, y + size - 2, BLACK);
-  int8_t wingY = flap ? y + size : y + 1;
-  arduboy.fillTriangle(x + size, y + size, x - size / 2, wingY,
-                       x + 3, y + size + 3, WHITE);
-  if (king) {
-    arduboy.drawLine(x + 3, y + 1, x + 4, y - 4);
-    arduboy.drawLine(x + 4, y - 4, x + 7, y);
-    arduboy.drawLine(x + 7, y, x + 10, y - 4);
-    arduboy.drawLine(x + 10, y - 4, x + 13, y + 1);
+  uint8_t frame = ((arduboy.frameCount >> 2) & 1) + (aimX < 0 ? 2 : 0);
+  Sprites::drawPlusMask(x, y, pigSprites, frame);
+  if (big) {
+    arduboy.drawLine(x + 5, y + 1, x + 7, y - 3, WHITE);
+    arduboy.drawLine(x + 7, y - 3, x + 10, y, WHITE);
+    arduboy.drawLine(x + 10, y, x + 13, y - 3, WHITE);
+    arduboy.drawLine(x + 13, y - 3, x + 15, y + 1, WHITE);
   }
 }
 
-void drawMole(int8_t x, int8_t y) {
-  arduboy.fillRoundRect(x + 1, y + 3, 9, 7, 3, WHITE);
-  arduboy.fillTriangle(x + 8, y + 5, x + 13, y + 7, x + 8, y + 9, WHITE);
-  arduboy.drawPixel(x + 7, y + 5, BLACK);
-  arduboy.drawFastHLine(x, y + 10, 12, WHITE);
+void drawCrow(int8_t x, int8_t y, bool king, uint8_t frame = 0) {
+  if (king) Sprites::drawPlusMask(x, y, crowKingSprites, frame & 1);
+  else Sprites::drawPlusMask(x - 2, y - 2, crowSprites, frame & 1);
 }
 
-void drawBee(int8_t x, int8_t y) {
-  arduboy.drawCircle(x + 3, y + 2, 3, WHITE);
-  arduboy.drawCircle(x + 8, y + 2, 3, WHITE);
-  arduboy.fillRoundRect(x + 2, y + 4, 8, 6, 3, WHITE);
-  arduboy.drawFastVLine(x + 5, y + 5, 5, BLACK);
-  arduboy.drawFastVLine(x + 8, y + 5, 4, BLACK);
-  arduboy.drawPixel(x + 10, y + 6, WHITE);
+void drawMole(int8_t x, int8_t y, uint8_t frame = 0) {
+  Sprites::drawPlusMask(x - 2, y - 3, moleSprites, frame & 1);
 }
 
-void drawMudMonster(int8_t x, int8_t y) {
-  uint8_t wobble = (arduboy.frameCount >> 3) & 1;
-  arduboy.fillRoundRect(x, y + 5 - wobble, 22, 13 + wobble, 5, WHITE);
-  arduboy.fillCircle(x + 5, y + 5, 5, WHITE);
-  arduboy.fillCircle(x + 16, y + 6, 6, WHITE);
-  arduboy.fillCircle(x + 7, y + 7, 2, BLACK);
-  arduboy.fillCircle(x + 16, y + 7, 2, BLACK);
-  arduboy.drawFastHLine(x + 7, y + 14, 9, BLACK);
-  arduboy.drawPixel(x + 3, y + 17, BLACK);
-  arduboy.drawPixel(x + 18, y + 16, BLACK);
+void drawBee(int8_t x, int8_t y, uint8_t frame = 0) {
+  Sprites::drawPlusMask(x - 2, y - 3, beeSprites, frame & 1);
 }
 
-void drawPen() {
-  arduboy.drawFastHLine(0, 10, 128, WHITE);
-  arduboy.drawFastHLine(0, 62, 128, WHITE);
+void drawMudMonster(int8_t x, int8_t y, uint8_t frame = 0) {
+  Sprites::drawPlusMask(x, y - 3, mudzillaSprites, frame & 1);
+}
+
+void drawPen(int8_t ox = 0, int8_t oy = 0) {
+  arduboy.drawFastHLine(ox, 10 + oy, 128, WHITE);
+  arduboy.drawFastHLine(ox, 62 + oy, 128, WHITE);
   for (uint8_t x = 2; x < 128; x += 16) {
-    arduboy.drawFastVLine(x, 10, 5, WHITE);
-    arduboy.drawFastVLine(x + 8, 58, 5, WHITE);
+    arduboy.drawFastVLine(x + ox, 10 + oy, 5, WHITE);
+    arduboy.drawFastVLine(x + 8 + ox, 58 + oy, 5, WHITE);
   }
-  arduboy.drawCircle(24, 30, 7, WHITE);
-  arduboy.drawCircle(24, 30, 4, WHITE);
-  arduboy.drawPixel(25, 28, WHITE);
-  arduboy.drawCircle(91, 45, 10, WHITE);
-  arduboy.drawCircle(91, 45, 6, WHITE);
+  arduboy.drawCircle(24 + ox, 30 + oy, 7, WHITE);
+  arduboy.drawCircle(24 + ox, 30 + oy, 4, WHITE);
+  arduboy.drawPixel(25 + ox, 28 + oy, WHITE);
+  arduboy.drawCircle(91 + ox, 45 + oy, 10, WHITE);
+  arduboy.drawCircle(91 + ox, 45 + oy, 6, WHITE);
+  arduboy.drawRect(111 + ox, 50 + oy, 10, 8, WHITE);
+  arduboy.drawLine(112 + ox, 50 + oy, 114 + ox, 47 + oy, WHITE);
+  arduboy.drawLine(120 + ox, 50 + oy, 118 + ox, 47 + oy, WHITE);
+  arduboy.drawPixel(115 + ox, 54 + oy, WHITE);
+  arduboy.drawPixel(118 + ox, 54 + oy, WHITE);
   for (uint8_t i = 0; i < 7; ++i)
-    arduboy.drawPixel((i * 19 + wave * 7) % 126, 14 + (i * 11) % 45, WHITE);
+    arduboy.drawPixel((i * 19 + wave * 7) % 126 + ox, 14 + (i * 11) % 45 + oy, WHITE);
 }
 
 void drawHud() {
   for (uint8_t i = 0; i < MAX_HP; ++i) {
     int8_t x = 2 + i * 6;
     if (i < hp) {
-      arduboy.fillRect(x, 2, 4, 4, WHITE);
-      arduboy.drawPixel(x, 2, BLACK);
-      arduboy.drawPixel(x + 3, 2, BLACK);
-    } else arduboy.drawRect(x, 2, 4, 4, WHITE);
+      arduboy.fillRoundRect(x, 1, 5, 6, 2, WHITE);
+      arduboy.drawPixel(x + 1, 4, BLACK);
+      arduboy.drawPixel(x + 3, 4, BLACK);
+    } else arduboy.drawRoundRect(x, 1, 5, 6, 2, WHITE);
   }
   arduboy.setCursor(44, 1);
   arduboy.print(F("PEN "));
   arduboy.print(wave);
   arduboy.drawRect(94, 2, 31, 5, WHITE);
-  uint8_t fill = bashCharge / 3;
-  if (fill) arduboy.fillRect(95, 3, smaller(29, fill), 3, WHITE);
-  if (bashCharge == 90 && (arduboy.frameCount & 8)) arduboy.drawRect(92, 0, 35, 9, WHITE);
+  uint8_t fill = (uint16_t)29 * bashCharge / BASH_MAX;
+  if (fill) arduboy.fillRect(95, 3, fill, 3, WHITE);
+  if (bashCharge == BASH_MAX && (arduboy.frameCount & 8)) {
+    arduboy.drawPixel(92, 1, WHITE); arduboy.drawPixel(126, 1, WHITE);
+    arduboy.drawPixel(92, 7, WHITE); arduboy.drawPixel(126, 7, WHITE);
+  }
 }
 
 void drawPlay() {
   int8_t ox = screenShake ? ((arduboy.frameCount & 1) ? 1 : -1) : 0;
   int8_t oy = screenShake && (arduboy.frameCount & 2) ? 1 : 0;
-  drawPen();
+  drawPen(ox, oy);
   for (uint8_t i = 0; i < MAX_SHOTS; ++i) {
     if (!shots[i].alive) continue;
-    arduboy.fillCircle(shots[i].x + ox, shots[i].y + oy, 2, WHITE);
-    arduboy.drawPixel(shots[i].x + ox, shots[i].y + oy, BLACK);
+    uint8_t frame = shots[i].vx > 0 ? 3 : (shots[i].vx < 0 ? 2 : (shots[i].vy < 0 ? 0 : 1));
+    Sprites::drawPlusMask(shots[i].x - 3 + ox, shots[i].y - 3 + oy, acornSprites, frame);
   }
   for (uint8_t i = 0; i < MAX_ENEMIES; ++i) {
     Foe &f = foes[i];
     if (!f.alive || (f.flash && (f.flash & 1))) continue;
-    if (f.type == CROW) drawCrow(f.x + ox, f.y + oy, false);
-    else if (f.type == MOLE) drawMole(f.x + ox, f.y + oy);
-    else if (f.type == BEE) drawBee(f.x + ox, f.y + oy);
-    else if (f.type == CROW_KING) drawCrow(f.x + ox, f.y + oy, true);
-    else drawMudMonster(f.x + ox, f.y + oy);
+    if (f.type == CROW) drawCrow(f.x + ox, f.y + oy, false, f.clock >> 2);
+    else if (f.type == MOLE) drawMole(f.x + ox, f.y + oy, f.clock >> 3);
+    else if (f.type == BEE) drawBee(f.x + ox, f.y + oy, f.clock >> 1);
+    else if (f.type == CROW_KING) {
+      drawCrow(f.x + ox, f.y + oy, true, f.clock >> 2);
+      if (f.clock % 75 > 66) arduboy.drawCircle(f.x + 11 + ox, f.y + 10 + oy, 13, WHITE);
+    } else drawMudMonster(f.x + ox, f.y + oy, f.clock % 36 < 12);
     if (f.type >= CROW_KING) {
-      uint8_t maxBoss = f.type == CROW_KING ? 18 : 24;
+      uint8_t maxBoss = f.type == CROW_KING ? CROW_KING_HP : MUDZILLA_HP;
       arduboy.drawRect(36, 12, 56, 4, WHITE);
       arduboy.fillRect(37, 13, (uint16_t)54 * f.hp / maxBoss, 2, WHITE);
     }
   }
   for (uint8_t i = 0; i < MAX_SPARKS; ++i) {
     if (!sparks[i].life) continue;
-    arduboy.drawLine(sparks[i].x, sparks[i].y, sparks[i].x - sparks[i].vx,
-                     sparks[i].y - sparks[i].vy, WHITE);
+    arduboy.drawLine(sparks[i].x + ox, sparks[i].y + oy,
+                     sparks[i].x - sparks[i].vx + ox,
+                     sparks[i].y - sparks[i].vy + oy, WHITE);
+  }
+  if (bashCharge < 15) {
+    uint8_t radius = 4 + bashCharge;
+    arduboy.drawCircle(pigX + 7 + ox, pigY + 7 + oy, radius, WHITE);
   }
   if (!invincible || !(arduboy.frameCount & 2)) drawPig(pigX + ox, pigY + oy);
+  if (calloutClock && (arduboy.frameCount & 2)) {
+    arduboy.fillRect(34, 53, 60, 8, BLACK);
+    if (calloutKind == 0) printCentered(F("HAM SLAM!"), 54);
+    else if (calloutKind == 1) printCentered(F("BONK!"), 54);
+    else if (calloutKind == 2) printCentered(F("BUZZ OFF!"), 54);
+    else printCentered(F("OINK-OOPS!"), 54);
+  }
   drawHud();
 }
 
@@ -559,19 +587,42 @@ void drawStory() {
   arduboy.setCursor(50, 33); arduboy.print(F("A"));
   arduboy.setCursor(88, 33); arduboy.print(F("B"));
   arduboy.setCursor(4, 43); arduboy.print(F("MOVE"));
-  arduboy.setCursor(39, 43); arduboy.print(F("ACORNS"));
-  arduboy.setCursor(82, 43); arduboy.print(F("BIG BASH"));
+  arduboy.setCursor(40, 43); arduboy.print(F("AUTO AIM"));
+  arduboy.setCursor(94, 43); arduboy.print(F("BASH!"));
   if (arduboy.frameCount & 16) printCentered(F("A: LET'S GO!"), 56);
+}
+
+void drawGiftIcon(uint8_t gift, int8_t x, int8_t y) {
+  if (gift == RAPID) {
+    arduboy.fillCircle(x + 5, y + 4, 2, WHITE);
+    arduboy.drawFastHLine(x, y + 2, 3, WHITE);
+    arduboy.drawFastHLine(x - 1, y + 5, 4, WHITE);
+  } else if (gift == TRIPLE) {
+    arduboy.fillCircle(x + 1, y + 5, 1, WHITE);
+    arduboy.fillCircle(x + 5, y + 2, 1, WHITE);
+    arduboy.fillCircle(x + 5, y + 7, 1, WHITE);
+  } else if (gift == TOUGH) {
+    arduboy.fillRoundRect(x, y + 1, 8, 7, 2, WHITE);
+    arduboy.drawPixel(x + 2, y + 5, BLACK);
+    arduboy.drawPixel(x + 5, y + 5, BLACK);
+    arduboy.drawLine(x + 1, y + 1, x + 7, y + 7, BLACK);
+  } else {
+    arduboy.drawLine(x, y + 4, x + 8, y + 4, WHITE);
+    arduboy.drawLine(x + 4, y, x + 4, y + 8, WHITE);
+    arduboy.drawLine(x + 1, y + 1, x + 7, y + 7, WHITE);
+    arduboy.fillCircle(x + 4, y + 4, 2, WHITE);
+  }
 }
 
 void printGift(uint8_t gift, int8_t x, bool picked) {
   arduboy.drawRoundRect(x, 24, 60, 30, 4, WHITE);
   if (picked) arduboy.drawRoundRect(x + 2, 26, 56, 26, 3, WHITE);
-  arduboy.setCursor(x + 3, 30);
+  drawGiftIcon(gift, x + 6, 30);
+  arduboy.setCursor(x + 18, 30);
   char buffer[13];
   strcpy_P(buffer, (PGM_P)pgm_read_ptr(&giftNames[gift]));
   arduboy.print(buffer);
-  arduboy.setCursor(x + 12, 42);
+  arduboy.setCursor(x + 10, 43);
   if (gift == RAPID) arduboy.print(F("FASTER!"));
   else if (gift == TRIPLE) arduboy.print(F("3 SHOTS"));
   else if (gift == TOUGH) arduboy.print(F("HEAL UP"));
@@ -589,12 +640,28 @@ void drawReward() {
 
 void drawBossCard() {
   arduboy.drawRect(3, 3, 122, 58, WHITE);
-  printCentered(F("WARNING!"), 8);
+  for (uint8_t x = 6; x < 124; x += 12) {
+    arduboy.drawLine(x, 4, x + 5, 9, WHITE);
+    arduboy.drawLine(x, 55, x + 5, 60, WHITE);
+  }
+  if (cardClock < 20) {
+    arduboy.setTextSize(2);
+    arduboy.setCursor(22, 23); arduboy.print(F("UH OH..."));
+    arduboy.setTextSize(1);
+    return;
+  }
+  printCentered(wave == 4 ? F("THE FEATHERED FIEND") : F("THE GLOBBY GOBLIN"), 12);
   arduboy.setTextSize(2);
-  if (wave == 4) { arduboy.setCursor(11, 23); arduboy.print(F("CROW KING")); drawCrow(53, 45, true); }
-  else { arduboy.setCursor(4, 23); arduboy.print(F("MUDZILLA!")); drawMudMonster(52, 44); }
+  if (wave == 4) {
+    drawCrow(7, 31, true, cardClock >> 2);
+    arduboy.setCursor(40, 28); arduboy.print(F("CROW"));
+    arduboy.setCursor(40, 42); arduboy.print(F("KING"));
+  } else {
+    drawMudMonster(5, 34, cardClock >> 3);
+    arduboy.setCursor(33, 34); arduboy.print(F("MUDZILLA"));
+  }
   arduboy.setTextSize(1);
-  if (arduboy.frameCount & 8) printCentered(F("A: FIGHT!"), 52);
+  if (cardClock > 55 && (arduboy.frameCount & 4)) printCentered(F("GET READY!"), 54);
 }
 
 void drawHurtCard() {
@@ -603,7 +670,7 @@ void drawHurtCard() {
   arduboy.drawCircle(82, 25, 5, WHITE);
   arduboy.drawLine(79, 22, 85, 28, WHITE);
   arduboy.drawLine(85, 22, 79, 28, WHITE);
-  printCentered(F("TRY THAT PEN AGAIN!"), 47);
+  printCentered(F("PIGS BOUNCE BACK!"), 47);
   if (arduboy.frameCount & 16) printCentered(F("PRESS A"), 56);
 }
 
@@ -635,29 +702,28 @@ void setup() {
   arduboy.begin();
   arduboy.setFrameRate(FPS);
   arduboy.initRandomSeed();
-  sound.begin();
   loadProgress();
 }
 
 void loop() {
   if (!arduboy.nextFrame()) return;
-  sound.timer();
   arduboy.pollButtons();
 
-  if (mode == TITLE && arduboy.justPressed(A_BUTTON)) { mode = STORY; playTone(1275, 5); }
+  if (mode == TITLE && arduboy.justPressed(A_BUTTON)) { mode = STORY; playTone(784, 5); }
   else if (mode == STORY && arduboy.justPressed(A_BUTTON)) newAdventure();
   else if (mode == PLAY) updatePlay();
   else if (mode == BOSS_CARD) {
-    if (cardClock < 21) ++cardClock;
-    if (cardClock > 20 && arduboy.justPressed(A_BUTTON)) { mode = PLAY; playTone(638, 8); }
+    if (cardClock < 75) ++cardClock;
+    else { mode = PLAY; playTone(1568, 8); }
   } else if (mode == REWARD) {
+    if (cardClock < 15) ++cardClock;
     if (arduboy.justPressed(LEFT_BUTTON)) rewardPick = 0;
     if (arduboy.justPressed(RIGHT_BUTTON)) rewardPick = 1;
-    if (arduboy.justPressed(A_BUTTON)) chooseGift();
+    if (cardClock == 15 && arduboy.justPressed(A_BUTTON)) chooseGift();
   } else if (mode == HURT_CARD) {
     if (cardClock < 21) ++cardClock;
     if (cardClock > 20 && arduboy.justPressed(A_BUTTON)) { hp = MAX_HP; beginWave(false); }
-  } else if (mode == VICTORY && arduboy.justPressed(A_BUTTON)) { mode = TITLE; playTone(1275, 6); }
+  } else if (mode == VICTORY && arduboy.justPressed(A_BUTTON)) { mode = TITLE; playTone(784, 6); }
   else if (mode == PAUSED) {
     if (arduboy.justPressed(A_BUTTON)) mode = modeBeforePause;
     if (arduboy.justPressed(B_BUTTON)) mode = TITLE;

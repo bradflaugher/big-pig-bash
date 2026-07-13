@@ -11,13 +11,16 @@ health, forgiving collisions, short rounds, and unlimited instant retries.
 
 | Control | Action |
 | --- | --- |
-| D-pad | Move and aim |
-| A (hold) | Fire acorns |
+| D-pad | Move around the pigpen |
+| A (hold or mash) | Auto-aim and fire acorns |
 | B | BIG BASH when the top-right meter is full |
-| A + B | Pause |
+| Hold Up + Down | Pause |
 
 Choose a power after each cleared pen with Left/Right and A. The four powers
 make acorns faster, fire three acorns, refill health, or recharge BIG BASH.
+
+Boss introductions are short automatic cartoons. Button mashing cannot skip
+them, and no button is needed to start the fight.
 
 ## Build
 
@@ -94,10 +97,12 @@ three seconds returns an FX to its loader menu.
 
 ## Design Notes
 
-- 128 x 64 monochrome graphics with animated, hand-built characters
+- Authored plus-mask pixel art with independent character animation
+- Reproducible sprite generation through `tools/generate_sprites.py`
 - Fixed-size actor pools and no dynamic allocation
 - 30 FPS action tuned for the ATmega32U4
-- Compact asynchronous music and sound effects through `BeepPin1`
+- Precise asynchronous music and effects through `ArduboyTones`
+- Auto-aim, one-hit critters, long damage recovery, and unlimited retries
 - Best progress and victory crowns saved in EEPROM
 - No game-over punishment: a loss restarts the same round at full health
 
