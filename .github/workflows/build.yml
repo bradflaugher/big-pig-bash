@@ -1,0 +1,65 @@
+name: Build Arduboy game
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  arduboy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out game
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install platformio==6.1.19
+
+      - name: Compile for Arduboy
+        run: pio run
+
+      - name: Check formatting errors
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+
+      - name: Prepare game artifact
+        run: |
+          mkdir -p artifact
+          cp .pio/build/arduboy/firmware.hex artifact/BigPigBash.hex
+
+      - name: Upload playable HEX
+        uses: actions/upload-artifact@v4
+        with:
+          name: BigPigBash-Arduboy
+          path: artifact/BigPigBash.hex
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > /tmp/release-notes.md <<'EOF'
+          ## Play in your browser
+
+          1. Download `BigPigBash.hex` from the assets below.
+          2. Open the [Ardens web player](https://tiberiusbrown.github.io/Ardens/player.html).
+          3. Drag `BigPigBash.hex` onto the player.
+          4. Use the arrow keys to move, `A` or `Z` to fire, and `S`, `X`, or `B` for BIG BASH.
+
+          Sound works in the browser. Press the Arduboy A and B buttons together to pause.
+
+          The same HEX can be uploaded directly to an Arduboy or Arduboy FX. It contains all
+          artwork and music, so no separate FX data file is required.
+          EOF
+          gh release create "$GITHUB_REF_NAME" artifact/BigPigBash.hex \
+            --verify-tag \
+            --title "Big Pig Bash $GITHUB_REF_NAME" \
+            --notes-file /tmp/release-notes.md
